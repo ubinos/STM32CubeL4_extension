@@ -29,6 +29,7 @@
 #define SLEEP_TIMEMS	1
 
 extern int _g_bsp_dtty_init;
+extern int _g_bsp_dtty_in_init;
 extern int _g_bsp_dtty_echo;
 extern int _g_bsp_dtty_autocr;
 
@@ -210,8 +211,10 @@ int dtty_init(void)
     uint16_t len;
     (void) r;
 
-    if (!_g_bsp_dtty_init && !bsp_isintr() && _bsp_kernel_active)
+    if (!_g_bsp_dtty_init && !_g_bsp_dtty_in_init && !bsp_isintr() && _bsp_kernel_active)
     {
+        _g_bsp_dtty_in_init = 1;
+
         r = semb_create(&_g_dtty_uart_rsem);
         assert(r == 0);
         r = semb_create(&_g_dtty_uart_wsem);
@@ -255,6 +258,8 @@ int dtty_init(void)
                 break;
             }
         } while(0);
+
+        _g_bsp_dtty_in_init = 0;
     }
 
     return 0;

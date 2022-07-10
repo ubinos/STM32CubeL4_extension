@@ -5,7 +5,6 @@
  */
 
 #include <ubinos.h>
-#include <ubinos/bsp/arch.h>
 
 #if (INCLUDE__UBINOS__BSP == 1)
 
@@ -20,6 +19,7 @@
 #endif
 
 #include <ubinos/bsp.h>
+#include <ubinos/bsp/arch.h>
 #include <ubinos/bsp_ubik.h>
 
 #include <assert.h>
@@ -211,8 +211,23 @@ int dtty_init(void)
     uint16_t len;
     (void) r;
 
-    if (!_g_bsp_dtty_init && !_g_bsp_dtty_in_init && !bsp_isintr() && _bsp_kernel_active)
+    do
     {
+        if (bsp_isintr() || 0 != _bsp_critcount)
+        {
+            break;
+        }
+
+        if (!_bsp_kernel_active)
+        {
+            break;
+        }
+
+        if (_g_bsp_dtty_init || _g_bsp_dtty_in_init)
+        {
+            break;
+        }
+
         _g_bsp_dtty_in_init = 1;
 
         r = semb_create(&_g_dtty_uart_rsem);
@@ -239,28 +254,20 @@ int dtty_init(void)
 
         _g_bsp_dtty_init = 1;
 
-        do
+        cbuf_clear(_g_dtty_uart_rbuf);
+
+        buf = cbuf_get_tail_addr(_g_dtty_uart_rbuf);
+        len = 1;
+        _g_dtty_uart_need_rx_restart = 0;
+        if (HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
         {
-            if (cbuf_is_full(_g_dtty_uart_rbuf))
-            {
-                _g_dtty_uart_rx_overflow_count++;
-                _g_dtty_uart_need_rx_restart = 1;
-                break;
-            }
-
-            len = 1;
-
-            buf = cbuf_get_tail_addr(_g_dtty_uart_rbuf);
-            _g_dtty_uart_need_rx_restart = 0;
-            if (HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
-            {
-                _g_dtty_uart_need_rx_restart = 1;
-                break;
-            }
-        } while(0);
+            _g_dtty_uart_need_rx_restart = 1;
+        }
 
         _g_bsp_dtty_in_init = 0;
-    }
+
+        break;
+    } while (1);
 
     return 0;
 }
@@ -290,9 +297,18 @@ static int _dtty_getc_advan(char *ch_p, int blocked)
     r = -1;
     do
     {
-        if (bsp_isintr())
+        if (bsp_isintr() || 0 != _bsp_critcount)
         {
             break;
+        }
+
+        if (!_g_bsp_dtty_init)
+        {
+            dtty_init();
+            if (!_g_bsp_dtty_init)
+            {
+                break;
+            }
         }
 
         if (!blocked)
@@ -308,60 +324,51 @@ static int _dtty_getc_advan(char *ch_p, int blocked)
             break;
         }
 
-        do
+        for (;;)
         {
-            if (!_g_bsp_dtty_init)
+            if (_g_dtty_uart_need_reset)
             {
-                dtty_init();
-                if (!_g_bsp_dtty_init)
+                _dtty_stm32_uart_reset();
+            }
+
+            if (_g_dtty_uart_need_rx_restart)
+            {
+                len = 1;
+
+                buf = cbuf_get_tail_addr(_g_dtty_uart_rbuf);
+                _g_dtty_uart_need_rx_restart = 0;
+                if (HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
                 {
-                    break;
+                    _g_dtty_uart_need_rx_restart = 1;
                 }
             }
 
-            for (;;)
+            ubi_err = cbuf_read(_g_dtty_uart_rbuf, (uint8_t*) ch_p, 1, NULL);
+            if (ubi_err == UBI_ERR_OK)
             {
-                if (_g_dtty_uart_need_reset)
-                {
-                    _dtty_stm32_uart_reset();
-                }
-
-                if (_g_dtty_uart_need_rx_restart)
-                {
-                    len = 1;
-
-                    buf = cbuf_get_tail_addr(_g_dtty_uart_rbuf);
-                    _g_dtty_uart_need_rx_restart = 0;
-                    if (HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
-                    {
-                        _g_dtty_uart_need_rx_restart = 1;
-                    }
-                }
-
-                ubi_err = cbuf_read(_g_dtty_uart_rbuf, (uint8_t*) ch_p, 1, NULL);
-                if (ubi_err == UBI_ERR_OK)
-                {
-                    r = 0;
-                    break;
-                }
-
+                r = 0;
+                break;
+            }
+            else
+            {
                 if (!blocked)
                 {
                     break;
                 }
-
-                sem_take_timedms(_g_dtty_uart_rsem, DTTY_UART_CHECK_INTERVAL_MS);
+                else
+                {
+                    sem_take_timedms(_g_dtty_uart_rsem, DTTY_UART_CHECK_INTERVAL_MS);
+                }
             }
+        }
 
-            if (0 == r && 0 != _g_bsp_dtty_echo)
-            {
-                dtty_putc(*ch_p);
-            }
-
-            break;
-        } while (1);
-
+        if (0 == r && 0 != _g_bsp_dtty_echo)
+        {
+            dtty_putc(*ch_p);
+        }
+        
         mutex_unlock(_g_dtty_uart_getlock);
+
         break;
     } while (1);
 
@@ -387,20 +394,26 @@ int dtty_putc(int ch)
     uint8_t data[2];
 
     r = -1;
-    if (!bsp_isintr())
+    do
     {
-        mutex_lock(_g_dtty_uart_putlock);
-        do
+        if (bsp_isintr() || 0 != _bsp_critcount)
         {
+            break;
+        }
+
+        if (!_g_bsp_dtty_init)
+        {
+            dtty_init();
             if (!_g_bsp_dtty_init)
             {
-                dtty_init();
-                if (!_g_bsp_dtty_init)
-                {
-                    break;
-                }
+                break;
             }
+        }
 
+        mutex_lock(_g_dtty_uart_putlock);
+
+        do
+        {
             if (_g_dtty_uart_need_reset)
             {
                 _dtty_stm32_uart_reset();
@@ -444,9 +457,13 @@ int dtty_putc(int ch)
             }
 
             r = 0;
-        } while (0);
+            break;
+        } while (1);
+
         mutex_unlock(_g_dtty_uart_putlock);
-    }
+
+        break;
+    } while (1);
 
     return r;
 }
@@ -458,9 +475,24 @@ int dtty_flush(void)
     uint16_t len;
 
     r = -1;
-    if (!bsp_isintr())
+    do
     {
+        if (bsp_isintr() || 0 != _bsp_critcount)
+        {
+            break;
+        }
+
+        if (!_g_bsp_dtty_init)
+        {
+            dtty_init();
+            if (!_g_bsp_dtty_init)
+            {
+                break;
+            }
+        }
+
         mutex_lock(_g_dtty_uart_putlock);
+ 
         for (;;)
         {
             if (_g_dtty_uart_need_reset)
@@ -489,53 +521,81 @@ int dtty_flush(void)
 
             sem_take_timedms(_g_dtty_uart_wsem, DTTY_UART_CHECK_INTERVAL_MS);
         }
+ 
         mutex_unlock(_g_dtty_uart_putlock);
-    }
 
+        break;
+    } while (1);
+ 
     return r;
 }
 
 int dtty_putn(const char *str, int len)
 {
-    int i = 0;
+    int r;
 
-    if (!_g_bsp_dtty_init)
+    r = -1;
+    do
     {
-        dtty_init();
-    }
+        if (bsp_isintr() || 0 != _bsp_critcount)
+        {
+            break;
+        }
 
-    if (_g_bsp_dtty_init && !bsp_isintr())
-    {
+        if (!_g_bsp_dtty_init)
+        {
+            dtty_init();
+            if (!_g_bsp_dtty_init)
+            {
+                break;
+            }
+        }
+
         if (NULL == str)
         {
-            return -2;
+            r = -2;
+            break;
         }
 
         if (0 > len)
         {
-            return -3;
+            r = -3;
+            break;
         }
 
-        for (i = 0; i < len; i++)
+        for (r = 0; r < len; r++)
         {
             dtty_putc(*str);
             str++;
         }
-    }
-    return i;
+
+        break;
+    } while (1);
+
+    return r;
 }
 
 int dtty_kbhit(void)
 {
-    int r = 0;
+    int r;
 
-    if (!_g_bsp_dtty_init)
+    r = -1;
+    do
     {
-        dtty_init();
-    }
+        if (bsp_isintr() || 0 != _bsp_critcount)
+        {
+            break;
+        }
 
-    if (_g_bsp_dtty_init && !bsp_isintr())
-    {
+        if (!_g_bsp_dtty_init)
+        {
+            dtty_init();
+            if (!_g_bsp_dtty_init)
+            {
+                break;
+            }
+        }
+
         if (cbuf_get_len(_g_dtty_uart_rbuf) != 0)
         {
             r = 1;
@@ -544,7 +604,9 @@ int dtty_kbhit(void)
         {
             r = 0;
         }
-    }
+
+        break;
+    } while (1);
 
     return r;
 }

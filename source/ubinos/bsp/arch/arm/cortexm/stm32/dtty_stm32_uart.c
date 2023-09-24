@@ -102,6 +102,7 @@ void dtty_stm32_uart_rx_callback(void)
     cbuf_pt rbuf = _g_dtty_uart_rbuf;
     sem_pt rsem = _g_dtty_uart_rsem;
     int need_signal = 0;
+    HAL_StatusTypeDef status;
 
     do
     {
@@ -143,7 +144,8 @@ void dtty_stm32_uart_rx_callback(void)
 
         buf = cbuf_get_tail_addr(rbuf);
         _g_dtty_uart_need_rx_restart = 0;
-        if (HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
+        status = HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len);
+        if (status != HAL_OK)
         {
             _g_dtty_uart_need_rx_restart = 1;
             break;
@@ -157,6 +159,7 @@ void dtty_stm32_uart_tx_callback(void)
     uint16_t len;
     cbuf_pt wbuf = _g_dtty_uart_wbuf;
     sem_pt wsem = _g_dtty_uart_wsem;
+    HAL_StatusTypeDef status;
 
     do
     {
@@ -191,7 +194,8 @@ void dtty_stm32_uart_tx_callback(void)
 
         buf = cbuf_get_head_addr(wbuf);
         _g_dtty_uart_need_tx_restart = 0;
-        if (HAL_UART_Transmit_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
+        status = HAL_UART_Transmit_IT(&DTTY_STM32_UART_HANDLE, buf, len);
+        if (status != HAL_OK)
         {
             _g_dtty_uart_need_tx_restart = 1;
             break;
@@ -210,6 +214,7 @@ int dtty_init(void)
     uint8_t * buf;
     uint16_t len;
     (void) r;
+    HAL_StatusTypeDef status;
 
     do
     {
@@ -259,7 +264,8 @@ int dtty_init(void)
         buf = cbuf_get_tail_addr(_g_dtty_uart_rbuf);
         len = 1;
         _g_dtty_uart_need_rx_restart = 0;
-        if (HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
+        status = HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len);
+        if (status != HAL_OK)
         {
             _g_dtty_uart_need_rx_restart = 1;
         }
@@ -293,6 +299,7 @@ static int _dtty_getc_advan(char *ch_p, int blocked)
     ubi_err_t ubi_err;
     uint8_t * buf;
     uint16_t len;
+    HAL_StatusTypeDef status;
 
     r = -1;
     do
@@ -337,7 +344,8 @@ static int _dtty_getc_advan(char *ch_p, int blocked)
 
                 buf = cbuf_get_tail_addr(_g_dtty_uart_rbuf);
                 _g_dtty_uart_need_rx_restart = 0;
-                if (HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
+                status = HAL_UART_Receive_IT(&DTTY_STM32_UART_HANDLE, buf, len);
+                if (status != HAL_OK)
                 {
                     _g_dtty_uart_need_rx_restart = 1;
                 }
@@ -392,6 +400,8 @@ int dtty_putc(int ch)
     uint16_t len;
     uint32_t written;
     uint8_t data[2];
+    sem_pt wsem = _g_dtty_uart_wsem;
+    HAL_StatusTypeDef status;
 
     r = -1;
     do
@@ -433,7 +443,7 @@ int dtty_putc(int ch)
 
             if (cbuf_get_len(_g_dtty_uart_wbuf) == 0)
             {
-                sem_clear(_g_dtty_uart_wsem);
+                sem_clear(wsem);
                 _g_dtty_uart_need_tx_restart = 1;
             }
 
@@ -449,7 +459,8 @@ int dtty_putc(int ch)
 
                 buf = cbuf_get_head_addr(_g_dtty_uart_wbuf);
                 _g_dtty_uart_need_tx_restart = 0;
-                if (HAL_UART_Transmit_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
+                status = HAL_UART_Transmit_IT(&DTTY_STM32_UART_HANDLE, buf, len);
+                if (status != HAL_OK)
                 {
                     _g_dtty_uart_need_tx_restart = 1;
                     break;
@@ -473,6 +484,8 @@ int dtty_flush(void)
     int r;
     uint8_t * buf;
     uint16_t len;
+    sem_pt wsem = _g_dtty_uart_wsem;
+    HAL_StatusTypeDef status;
 
     r = -1;
     do
@@ -506,7 +519,8 @@ int dtty_flush(void)
 
                 buf = cbuf_get_head_addr(_g_dtty_uart_wbuf);
                 _g_dtty_uart_need_tx_restart = 0;
-                if (HAL_UART_Transmit_IT(&DTTY_STM32_UART_HANDLE, buf, len) != HAL_OK)
+                status = HAL_UART_Transmit_IT(&DTTY_STM32_UART_HANDLE, buf, len);
+                if (status != HAL_OK)
                 {
                     _g_dtty_uart_need_tx_restart = 1;
                     break;
@@ -519,7 +533,7 @@ int dtty_flush(void)
                 break;
             }
 
-            sem_take_timedms(_g_dtty_uart_wsem, DTTY_UART_CHECK_INTERVAL_MS);
+            sem_take_timedms(wsem, DTTY_UART_CHECK_INTERVAL_MS);
         }
  
         mutex_unlock(_g_dtty_uart_putlock);

@@ -117,46 +117,7 @@ void dtty_stm32_usbd_rx_callback(uint8_t* buf, uint32_t *len)
 
 void dtty_stm32_usbd_tx_callback(void)
 {
-    uint8_t * buf;
-    uint8_t usb_status;
-
-    if (_g_dtty_usbd_write_trying_size > 0)
-    {
-        cbuf_read(_g_dtty_usbd_wbuf, NULL, _g_dtty_usbd_write_trying_size, NULL);
-
-        if (cbuf_get_len(_g_dtty_usbd_wbuf) > 0)
-        {
-            _g_dtty_usbd_write_trying_size = cbuf_get_len(_g_dtty_usbd_wbuf);
-            buf = cbuf_get_head_addr(_g_dtty_usbd_wbuf);
-            USBD_CDC_SetTxBuffer(&USBD_Device, buf, _g_dtty_usbd_write_trying_size);
-            usb_status =USBD_CDC_TransmitPacket(&USBD_Device);
-            if(usb_status == USBD_OK)
-            {
-                if (cbuf_get_len(_g_dtty_usbd_wbuf) < (_g_dtty_usbd_wbuf->size / 2))
-                {
-                    sem_give(_g_dtty_usbd_wsem);
-                }
-            }
-            else
-            {
-                _g_dtty_usbd_need_tx_restart = 1;
-                _g_dtty_usbd_write_trying_size = 0;
-                if (_g_dtty_usbd_wsem != NULL)
-                {
-                    sem_give(_g_dtty_usbd_wsem);
-                }
-            }
-        }
-        else
-        {
-            _g_dtty_usbd_need_tx_restart = 1;
-            _g_dtty_usbd_write_trying_size = 0;
-            if (_g_dtty_usbd_wsem != NULL)
-            {
-                sem_give(_g_dtty_usbd_wsem);
-            }
-        }
-    }
+    sem_give(_g_dtty_usbd_wsem);
 }
 
 int dtty_init(void)
@@ -317,11 +278,9 @@ int dtty_getc_unblocked(char *ch_p)
 int dtty_putc(int ch)
 {
     int r;
-    uint8_t * buf;
     uint16_t len;
     uint32_t written;
     uint8_t data[2];
-    uint8_t usb_status;
 
     r = -1;
     do
@@ -353,9 +312,10 @@ int dtty_putc(int ch)
 
         do
         {
-            if (_g_dtty_usbd_need_reset)
+            if (cbuf_is_full(_g_dtty_usbd_wbuf))
             {
-                _dtty_stm32_usbd_reset();
+                _g_dtty_usbd_tx_overflow_count++;
+                break;
             }
 
             if (0 != _g_bsp_dtty_autocr && '\n' == ch)
@@ -374,31 +334,10 @@ int dtty_putc(int ch)
             if (written != len)
             {
                 _g_dtty_usbd_tx_overflow_count++;
+                break;
             }
 
-            if (_g_dtty_usbd_need_tx_restart)
-            {
-                _g_dtty_usbd_need_tx_restart = 0;
-                _g_dtty_usbd_write_trying_size = cbuf_get_len(_g_dtty_usbd_wbuf);
-                buf = cbuf_get_head_addr(_g_dtty_usbd_wbuf);
-                USBD_CDC_SetTxBuffer(&USBD_Device, buf, _g_dtty_usbd_write_trying_size);
-                usb_status =USBD_CDC_TransmitPacket(&USBD_Device);
-                if(usb_status == USBD_OK)
-                {
-                    r = 0;
-                }
-                else
-                {
-                    _g_dtty_usbd_need_tx_restart = 1;
-                    _g_dtty_usbd_write_trying_size = 0;
-                    r = -1;
-                }
-            }
-            else
-            {
-                r = 0;
-            }
-
+            r = 0;
             break;
         } while (1);
 
@@ -457,7 +396,11 @@ int dtty_putn(const char *str, int len)
 
         for (r = 0; r < len; r++)
         {
-            dtty_putc(*str);
+            r = dtty_putc(*str);
+            if (r < 0)
+            {
+                break;
+            }
             str++;
         }
 
@@ -507,7 +450,8 @@ void dtty_write_process(void *arg)
 {
     uint8_t * buf;
     uint32_t len;
-    cbuf_pt wbuf = _g_dtty_usbd_isr_wbuf;
+    int r;
+    uint8_t usb_status;
 
     do
     {
@@ -516,12 +460,40 @@ void dtty_write_process(void *arg)
             break;
         }
 
-        while (cbuf_get_len(wbuf) > 0)
+        if (_g_dtty_usbd_need_reset)
         {
-            buf = cbuf_get_head_addr(wbuf);
-            len = cbuf_get_contig_len(wbuf);
-            dtty_putn((const char *) buf, len);
-            cbuf_read(wbuf, NULL, len, NULL);
+            _dtty_stm32_usbd_reset();
+        }
+
+        while (cbuf_get_len(_g_dtty_usbd_isr_wbuf) > 0)
+        {
+            buf = cbuf_get_head_addr(_g_dtty_usbd_isr_wbuf);
+            len = cbuf_get_contig_len(_g_dtty_usbd_isr_wbuf);
+
+            r = dtty_putn((const char *) buf, len);
+            if (r <= 0)
+            {
+                break;
+            }
+
+            cbuf_read(_g_dtty_usbd_isr_wbuf, NULL, r, NULL);
+        }
+
+        while (cbuf_get_len(_g_dtty_usbd_wbuf) > 0)
+        {
+            buf = cbuf_get_head_addr(_g_dtty_usbd_wbuf);
+            len = cbuf_get_contig_len(_g_dtty_usbd_wbuf);
+            
+            USBD_CDC_SetTxBuffer(&USBD_Device, buf, len);
+            usb_status = USBD_CDC_TransmitPacket(&USBD_Device);
+            if(usb_status == USBD_OK)
+            {
+                cbuf_read(_g_dtty_usbd_wbuf, NULL, len, NULL);
+            }
+            else
+            {
+                break;
+            }
         }
 
         break;

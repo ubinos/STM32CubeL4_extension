@@ -26,8 +26,6 @@
 
 #include "main.h"
 
-#define SLEEP_TIMEMS	1
-
 extern int _g_bsp_dtty_init;
 extern int _g_bsp_dtty_in_init;
 extern int _g_bsp_dtty_echo;
@@ -55,10 +53,7 @@ uint32_t _g_dtty_usbd_rx_overflow_count = 0;
 uint32_t _g_dtty_usbd_tx_overflow_count = 0;
 uint32_t _g_dtty_usbd_reset_count = 0;
 
-volatile uint8_t _g_dtty_usbd_need_reset = 0;
-volatile uint8_t _g_dtty_usbd_need_tx_restart = 0;
-
-volatile uint32_t _g_dtty_usbd_write_trying_size = 0;
+uint8_t _g_dtty_usbd_need_reset = 0;
 
 static void _dtty_stm32_usbd_reset(void);
 static int _dtty_getc_advan(char *ch_p, int blocked);
@@ -70,7 +65,6 @@ static void _dtty_stm32_usbd_reset(void)
     if (_g_dtty_usbd_need_reset)
     {
         _g_dtty_usbd_need_reset = 0;
-        _g_dtty_usbd_need_tx_restart = 1;
 
         /* Enable Power Clock*/
         __HAL_RCC_PWR_CLK_ENABLE();
@@ -281,6 +275,7 @@ int dtty_putc(int ch)
     uint16_t len;
     uint32_t written;
     uint8_t data[2];
+    uint8_t need_notify = 0;
 
     r = -1;
     do
@@ -289,10 +284,18 @@ int dtty_putc(int ch)
         {
             data[0] = (uint8_t) ch;
             len = 1;
+            if (cbuf_get_len(_g_dtty_usbd_isr_wbuf) == 0)
+            {
+                need_notify = 1;
+            }
             cbuf_write(_g_dtty_usbd_isr_wbuf, data, len, &written);
             if (written != len)
             {
                 _g_dtty_usbd_tx_overflow_count++;
+            }
+            if (need_notify)
+            {
+                sem_give(_g_dtty_usbd_wsem);
             }
 
             r = 0;
@@ -330,11 +333,19 @@ int dtty_putc(int ch)
                 len = 1;
             }
 
+            if (cbuf_get_len(_g_dtty_usbd_wbuf) == 0)
+            {
+                need_notify = 1;
+            }
             cbuf_write(_g_dtty_usbd_wbuf, data, len, &written);
             if (written != len)
             {
                 _g_dtty_usbd_tx_overflow_count++;
                 break;
+            }
+            if (need_notify)
+            {
+                sem_give(_g_dtty_usbd_wsem);
             }
 
             r = 0;
@@ -358,6 +369,7 @@ int dtty_putn(const char *str, int len)
 {
     int r;
     uint32_t written;
+    uint8_t need_notify = 0;
 
     r = -1;
     do
@@ -376,11 +388,20 @@ int dtty_putn(const char *str, int len)
 
         if (bsp_isintr() || 0 != _bsp_critcount)
         {
+            if (cbuf_get_len(_g_dtty_usbd_isr_wbuf) == 0)
+            {
+                need_notify = 1;
+            }
             cbuf_write(_g_dtty_usbd_isr_wbuf, (uint8_t *) str, len, &written);
             if (written != len)
             {
                 _g_dtty_usbd_tx_overflow_count++;
             }
+            if (need_notify)
+            {
+                sem_give(_g_dtty_usbd_wsem);
+            }
+
             r = written;
             break;
         }
@@ -393,17 +414,37 @@ int dtty_putn(const char *str, int len)
                 break;
             }
         }
-
-        for (r = 0; r < len; r++)
+        if (0 != _g_bsp_dtty_autocr)
         {
-            r = dtty_putc(*str);
-            if (r < 0)
+            for (written = 0; written < len; written++)
             {
+                r = dtty_putc(*str);
+                if (r < 0)
+                {
+                    break;
+                }
+                str++;
+            }
+        }
+        else
+        {
+            if (cbuf_get_len(_g_dtty_usbd_wbuf) == 0)
+            {
+                need_notify = 1;
+            }
+            cbuf_write(_g_dtty_usbd_wbuf, (uint8_t *) str, len, &written);
+            if (written != len)
+            {
+                _g_dtty_usbd_tx_overflow_count++;
                 break;
             }
-            str++;
+            if (need_notify)
+            {
+                sem_give(_g_dtty_usbd_wsem);
+            }
         }
 
+        r = written;
         break;
     } while (1);
 
@@ -463,6 +504,11 @@ void dtty_write_process(void *arg)
         if (_g_dtty_usbd_need_reset)
         {
             _dtty_stm32_usbd_reset();
+        }
+
+        if (!task_is_idle(NULL))
+        {
+            sem_take_timedms(_g_dtty_usbd_wsem, DTTY_USBD_WRITE_CHECK_INTERVAL_MS);
         }
 
         while (cbuf_get_len(_g_dtty_usbd_isr_wbuf) > 0)
